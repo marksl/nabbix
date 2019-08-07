@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net.Sockets;
 using System.Text;
 using Common.Logging;
@@ -23,20 +25,42 @@ namespace Nabbix
 
         private static string GetRequest(NetworkStream stream)
         {
-            StringBuilder builder = new StringBuilder(32);
+            const int lengthSize = 4;
+            const int reservedSize = 4;
+
+            var dataLength = 0;
+
+            var oldProtocol = false;
+            var bytes = new List<byte>();
             int oneByte;
             do
             {
                 oneByte = stream.ReadByte();
+                bytes.Add((byte) oneByte);
 
-                if (oneByte != 10)
+                if(oldProtocol && (bytes.Count >= 32 || oneByte == 10))
+                    return Encoding.ASCII.GetString(bytes.ToArray());
+
+                if (bytes.Count == Header.Length)
                 {
-                    builder.Append((char) oneByte);
+                    if (!bytes.Take(Header.Length).SequenceEqual(Header))
+                        oldProtocol = true;
                 }
+                else if (bytes.Count == Header.Length + lengthSize)
+                {
+                    var lengthBytes = bytes.Skip(Header.Length).Take(lengthSize).ToArray();
+                    dataLength = GetLittleEndianIntegerFromByteArray(lengthBytes, 0);
+                }
+                else if (bytes.Count == Header.Length + lengthSize + reservedSize + dataLength)
+                {
+                    var dataBytes = bytes.Skip(Header.Length + lengthSize + reservedSize).Take(dataLength).ToArray();
+                    var dataString = Encoding.ASCII.GetString(dataBytes);
 
-            } while (oneByte != -1 && oneByte != 10);
+                    return dataString;
+                }
+            } while (oneByte != -1);
 
-            return builder.ToString();
+            return "ZBX_INVALID_DATA_ERR"; // never occurs i think
         }
 
         private static readonly byte[] Header = {(byte)'Z', (byte)'B', (byte)'X', (byte)'D', 1};
@@ -66,15 +90,23 @@ namespace Nabbix
             do
             {
                 Log.Debug("Request recieving...");
-                string request = GetRequest(stream);
+                var request = GetRequest(stream);
                 Log.DebugFormat("Request received: {0}", request);
 
-                string response = registry.GetItemValue(request);
+                var response = registry.GetItemValue(request);
                 Log.DebugFormat("Response: {0}", response);
                 SendResponse(stream, response);
             } while (stream.DataAvailable);
 
             Log.Debug("Run. Ended.");
+        }
+
+        static int GetLittleEndianIntegerFromByteArray(byte[] data, int startIndex)
+        {
+            return (data[startIndex + 3] << 24)
+                   | (data[startIndex + 2] << 16)
+                   | (data[startIndex + 1] << 8)
+                   | data[startIndex];
         }
     }
 }
